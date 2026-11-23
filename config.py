@@ -34,6 +34,9 @@ class Config:
     stale_after_minutes: int = 30
     http_timeout_seconds: int = 25
     log_level: str = "INFO"
+    app_mode: str = "web"
+    web_host: str = "127.0.0.1"
+    web_port: int = 8080
 
     @property
     def stale_after(self) -> timedelta:
@@ -44,13 +47,24 @@ class Config:
         return self.queue_home, self.queue_secondary
 
     @classmethod
-    def from_env(cls, *, require_telegram: bool = True) -> Config:
+    def from_env(cls, *, require_telegram: bool | None = None) -> Config:
         load_dotenv()
+        mode = os.getenv("APP_MODE", "web").strip().lower()
+        if mode not in {"web", "telegram"}:
+            raise ValueError("APP_MODE має бути web або telegram")
+        if require_telegram is None:
+            require_telegram = mode == "telegram"
         token = os.getenv("BOT_TOKEN", "").strip()
-        ids = tuple(
-            dict.fromkeys(
-                int(v.strip()) for v in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if v.strip()
+        ids = (
+            tuple(
+                dict.fromkeys(
+                    int(v.strip())
+                    for v in os.getenv("ALLOWED_CHAT_IDS", "").split(",")
+                    if v.strip()
+                )
             )
+            if require_telegram
+            else ()
         )
         if require_telegram and (not token or not ids or 0 in ids):
             raise ValueError("Заповніть BOT_TOKEN і непорожній ALLOWED_CHAT_IDS у .env")
@@ -88,6 +102,9 @@ class Config:
         level = os.getenv("LOG_LEVEL", "INFO").upper()
         if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("Некоректний LOG_LEVEL")
+        web_port = positive("WEB_PORT", 8080)
+        if web_port > 65535:
+            raise ValueError("WEB_PORT має бути в межах 1–65535")
         return cls(
             bot_token=token,
             allowed_chat_ids=ids,
@@ -104,4 +121,7 @@ class Config:
             stale_after_minutes=stale,
             http_timeout_seconds=positive("HTTP_TIMEOUT_SECONDS", 25),
             log_level=level,
+            app_mode=mode,
+            web_host=os.getenv("WEB_HOST", "127.0.0.1"),
+            web_port=web_port,
         )

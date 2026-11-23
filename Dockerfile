@@ -12,7 +12,9 @@ RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --no-create-home b
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=bot:bot *.py ./
+COPY --chown=bot:bot static/ ./static/
 USER bot
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD ["python", "healthcheck.py"]
 CMD ["python", "main.py"]

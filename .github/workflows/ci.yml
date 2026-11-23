@@ -22,4 +22,15 @@ jobs:
       - run: docker build -t odesa-power-lift:test .
       - name: Check SQLite volume and healthcheck inside the image
         run: |
-          docker run --rm --read-only --tmpfs /tmp -v smoke_data:/app/data odesa-power-lift:test python -c "from pathlib import Path; from datetime import datetime, UTC; from database import Database; from healthcheck import healthy; p=Path('/app/data/smoke.sqlite3'); d=Database(p); now=datetime.now(UTC); [d.set_meta(k, now.isoformat()) for k in ('heartbeat_monitor','heartbeat_scheduler','heartbeat_polling')]; assert healthy(p, now); d.close()"
+          docker run --rm --read-only --tmpfs /tmp -v smoke_data:/app/data odesa-power-lift:test python -c "from pathlib import Path; from datetime import datetime, UTC; from database import Database; from healthcheck import healthy; p=Path('/app/data/smoke.sqlite3'); d=Database(p); now=datetime.now(UTC); [d.set_meta(k, now.isoformat()) for k in ('heartbeat_monitor','heartbeat_scheduler','heartbeat_polling','heartbeat_web')]; assert healthy(p, now); assert healthy(p, now, mode='web'); d.close()"
+      - name: Start web mode without a Telegram token
+        run: |
+          docker run -d --name web_smoke --read-only --tmpfs /tmp -v web_smoke_data:/app/data -e APP_MODE=web -e WEB_HOST=0.0.0.0 -e BOT_TOKEN= -p 127.0.0.1:18080:8080 odesa-power-lift:test
+          trap 'docker logs web_smoke; docker rm -f web_smoke' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/ > /tmp/dashboard.html; then break; fi
+            sleep 1
+          done
+          grep -q 'Світло й ліфт' /tmp/dashboard.html
+          curl --fail --silent http://127.0.0.1:18080/api/dashboard | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['days']) == 2; assert d['timezone'] == 'Europe/Kyiv'"
+          curl --fail --silent http://127.0.0.1:18080/healthz

@@ -12,10 +12,8 @@ class InstanceLock:
     def __init__(self, token: str, database_path: Path):
         digest = hashlib.sha256(token.encode()).hexdigest()[:24]
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        self.paths = [
-            Path(tempfile.gettempdir()) / f"odesa-power-{digest}.lock",
-            database_path.parent / "monitor.instance.lock",
-        ]
+        self.paths = [Path(tempfile.gettempdir()) / f"odesa-power-{digest}.lock"] if token else []
+        self.paths.append(database_path.parent / "monitor.instance.lock")
         self.files = []
 
     def __enter__(self) -> InstanceLock:

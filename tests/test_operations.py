@@ -12,6 +12,7 @@ from instance_lock import InstanceLock
 
 
 def test_config_requires_credentials_and_never_repr_token(monkeypatch, config):
+    monkeypatch.setenv("APP_MODE", "telegram")
     monkeypatch.setenv("BOT_TOKEN", "")
     monkeypatch.setenv("ALLOWED_CHAT_IDS", "")
     with pytest.raises(ValueError):

@@ -76,6 +76,11 @@ class GuardedBot(Bot):
 
 
 async def run(config: Config) -> None:
+    if config.app_mode == "web":
+        from web_dashboard import serve
+
+        await serve(config)
+        return
     with InstanceLock(config.bot_token, config.database_path):
         db = Database(config.database_path)
         conflict, stop = asyncio.Event(), asyncio.Event()

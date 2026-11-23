@@ -25,7 +25,7 @@ class Monitor:
         config: Config,
         db: Database,
         provider: ScheduleProvider,
-        dispatcher: NotificationDispatcher,
+        dispatcher: NotificationDispatcher | None = None,
     ):
         self.config, self.db, self.provider, self.dispatcher = config, db, provider, dispatcher
         self.lock = asyncio.Lock()
@@ -64,16 +64,19 @@ class Monitor:
             changes = self.db.apply_schedules(
                 schedules,
                 now,
-                lambda c: change_events(c, self.db, self.config, now),
+                lambda c: change_events(c, self.db, self.config, now) if self.dispatcher else [],
             )
             self.db.set_meta("source_retry_at", "")
-            self.db.reconcile_warnings(warning_events(self.db, self.config, now), now)
+            if self.dispatcher:
+                self.db.reconcile_warnings(warning_events(self.db, self.config, now), now)
             today = now.astimezone(self.config.timezone).date()
             self.db.cleanup(today - timedelta(days=90))
         logger.info("Отримано %s графіки; нормалізованих змін: %s", len(schedules), len(changes))
         return True
 
     async def tick(self, now: datetime | None = None) -> None:
+        if self.dispatcher is None:
+            return
         now = now or datetime.now(UTC)
         async with self.lock:
             self.db.set_meta("heartbeat_scheduler", stamp(now))
@@ -100,7 +103,7 @@ class Monitor:
             await self.dispatcher.dispatch(now)
 
     async def monitor_loop(self) -> None:
-        # Початкове завантаження виконується main до polling, далі кожні N хвилин.
+        # Початкове завантаження виконується під час запуску, далі кожні N хвилин.
         next_check = datetime.now(UTC) + timedelta(minutes=self.config.check_interval_minutes)
         while True:
             now = datetime.now(UTC)

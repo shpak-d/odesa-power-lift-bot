@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b1220">
+  <title>Світло й ліфт · Одеса</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Світло й ліфт — головна">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m13 2-8 12h6l-1 8 9-13h-6l1-7Z"/></svg></span>
+        <span>Світло й ліфт<span class="brand-city">Одеса</span></span>
+      </a>
+      <div class="connection" id="connection" role="status">Завантаження даних</div>
+    </header>
+
+    <main>
+      <section class="intro">
+        <div><p class="eyebrow" id="operator">ДТЕК Одеські електромережі</p><h1>Ваш день за графіком.</h1><p class="subtitle">Дві лінії живлення. Один зрозумілий прогноз.</p></div>
+        <div class="clock"><span id="clock">—:—</span><span>Київський час</span></div>
+      </section>
+
+      <div class="banner" id="banner" role="status" hidden></div>
+
+      <section class="date-bar" aria-label="Вибір дня">
+        <div class="day-switch"><button type="button" data-day="0" aria-pressed="true">Сьогодні</button><button type="button" data-day="1" aria-pressed="false">Завтра</button></div>
+        <p id="selected-date">Завантажуємо графіки…</p>
+      </section>
+
+      <section class="lift-card" aria-labelledby="lift-heading">
+        <div class="lift-symbol" aria-hidden="true"><svg viewBox="0 0 48 48"><rect x="10" y="8" width="28" height="34" rx="4"/><path d="M24 9v32M18 4l-3 3m3-3 3 3m9-3-3 3m3-3 3 3M17 21v10m14-10v10"/></svg></div>
+        <div class="lift-copy"><p class="eyebrow">Ліфт · прогноз</p><h2 id="lift-heading">Завантажуємо дані</h2><p id="lift-description">Розраховуємо перетини відключень двох ліній.</p></div>
+        <div class="lift-total"><strong id="lift-total">—</strong><span>можливого простою за день</span></div>
+      </section>
+
+      <section class="timeline-card" aria-labelledby="timeline-title">
+        <div class="section-heading"><h2 id="timeline-title">День на одній шкалі</h2><span>Усі години — Europe/Kyiv</span></div>
+        <div id="timelines" class="timelines"><p class="muted">Очікуємо дані джерела.</p></div>
+        <div class="legend"><span><i class="swatch home"></i>Квартира</span><span><i class="swatch secondary"></i>Друга лінія</span><span><i class="swatch lift"></i>Перетин ліній</span><span><i class="swatch possible"></i>Можливе відключення</span></div>
+      </section>
+
+      <section class="schedule-grid" aria-label="Графіки ліній живлення">
+        <article class="schedule-card"><div class="card-heading"><span class="line-icon home" aria-hidden="true">⌂</span><div><p class="eyebrow">Основна лінія</p><h2>Квартира <span class="queue" id="home-queue">2.1</span></h2></div></div><div id="home-intervals" class="intervals"><p class="muted">Завантаження…</p></div><p class="source-time" id="home-update">Час оновлення з’явиться після отримання даних.</p></article>
+        <article class="schedule-card"><div class="card-heading"><span class="line-icon secondary" aria-hidden="true">▥</span><div><p class="eyebrow">Резервна лінія ліфта</p><h2>Друга лінія <span class="queue" id="secondary-queue">4.1</span></h2></div></div><div id="secondary-intervals" class="intervals"><p class="muted">Завантаження…</p></div><p class="source-time" id="secondary-update">Час оновлення з’явиться після отримання даних.</p></article>
+      </section>
+
+      <section class="monitor-card" aria-labelledby="monitor-title"><div><p class="eyebrow">Стан моніторингу</p><h2 id="monitor-title">Очікуємо першу перевірку</h2></div><dl><div><dt>Остання перевірка</dt><dd id="last-check">Ще не було</dd></div><div><dt>Успішне отримання</dt><dd id="last-success">Ще не було</dd></div><div><dt>Період перевірки</dt><dd id="check-interval">Кожні 10 хвилин</dd></div></dl></section>
+
+      <aside class="notice"><span aria-hidden="true">ⓘ</span><p><strong>Графік — це прогноз.</strong> Ліфт може живитися від будь-якої з двох ліній. Їхнє одночасне відключення означає можливий простій, а не підтверджений стан ліфта. Аварійні відключення можуть відбуватися поза графіком.</p></aside>
+    </main>
+    <footer><span>Сторінка оновлюється автоматично кожні 30 секунд.</span><a href="https://www.dtek-oem.com.ua/ua/shutdowns" target="_blank" rel="noopener noreferrer">Перевірити на сайті ДТЕК</a></footer>
+  </div>
+</body>
+</html>
