@@ -20,3 +20,6 @@ jobs:
       - run: pytest -q
       - run: cp .env.example .env && docker compose config --quiet
       - run: docker build -t odesa-power-lift:test .
+      - name: Check SQLite volume and healthcheck inside the image
+        run: |
+          docker run --rm --read-only --tmpfs /tmp -v smoke_data:/app/data odesa-power-lift:test python -c "from pathlib import Path; from datetime import datetime, UTC; from database import Database; from healthcheck import healthy; p=Path('/app/data/smoke.sqlite3'); d=Database(p); now=datetime.now(UTC); [d.set_meta(k, now.isoformat()) for k in ('heartbeat_monitor','heartbeat_scheduler','heartbeat_polling')]; assert healthy(p, now); d.close()"

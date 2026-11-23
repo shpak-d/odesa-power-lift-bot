@@ -32,7 +32,12 @@ Python 3.11+, aiogram 3, asyncio, httpx, SQLite, Docker Compose. Стежить 
 [Docker для похідних Ubuntu](https://docs.docker.com/engine/install/ubuntu/), обравши
 відповідну базову версію Ubuntu. Команди нижче виконуються в терміналі Linux.
 
-1. Клонуйте репозиторій і перейдіть у каталог проєкту.
+1. Клонуйте репозиторій і перейдіть у каталог проєкту:
+
+   ```bash
+   git clone https://github.com/shpak-d/odesa-power-lift-bot.git
+   cd odesa-power-lift-bot
+   ```
 2. Створіть `.env`:
 
    ```bash
