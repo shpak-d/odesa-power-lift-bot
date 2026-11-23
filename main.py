@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import httpx
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter
+from aiogram.exceptions import TelegramConflictError, TelegramNetworkError, TelegramRetryAfter
 from aiogram.methods import GetMe, GetUpdates, GetWebhookInfo, SetMyCommands
 from aiogram.types import BotCommand
 
@@ -44,6 +44,7 @@ class GuardedBot(Bot):
         self.db, self.conflict = db, conflict
 
     async def __call__(self, method, request_timeout=None):
+        network_retry_delay = 5
         while True:
             try:
                 return await super().__call__(method, request_timeout=request_timeout)
@@ -56,6 +57,16 @@ class GuardedBot(Bot):
                     exc.retry_after,
                 )
                 await asyncio.sleep(exc.retry_after)
+            except TelegramNetworkError:
+                if not isinstance(method, RETRYABLE_STARTUP_METHODS):
+                    raise
+                logger.warning(
+                    "Мережева помилка Telegram під час %s: повторна спроба через %s с",
+                    method.__api_method__,
+                    network_retry_delay,
+                )
+                await asyncio.sleep(network_retry_delay)
+                network_retry_delay = min(network_retry_delay * 2, 60)
             except TelegramConflictError:
                 self.conflict.set()
                 raise
