@@ -9,8 +9,8 @@ from datetime import UTC, datetime
 import httpx
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramConflictError
-from aiogram.methods import GetUpdates
+from aiogram.exceptions import TelegramConflictError, TelegramRetryAfter
+from aiogram.methods import GetMe, GetUpdates, GetWebhookInfo, SetMyCommands
 from aiogram.types import BotCommand
 
 from bot import create_router
@@ -20,6 +20,10 @@ from instance_lock import InstanceLock
 from monitor import Monitor
 from notifications import NotificationDispatcher
 from schedule_provider import HttpScheduleProvider
+
+logger = logging.getLogger(__name__)
+# Також охоплює getMe з bot.me() при запуску polling в aiogram.
+RETRYABLE_STARTUP_METHODS = (GetMe, GetWebhookInfo, SetMyCommands)
 
 
 class RedactingFormatter(logging.Formatter):
@@ -40,14 +44,24 @@ class GuardedBot(Bot):
         self.db, self.conflict = db, conflict
 
     async def __call__(self, method, request_timeout=None):
-        try:
-            return await super().__call__(method, request_timeout=request_timeout)
-        except TelegramConflictError:
-            self.conflict.set()
-            raise
-        finally:
-            if isinstance(method, GetUpdates):
-                self.db.set_meta("heartbeat_polling", stamp(datetime.now(UTC)))
+        while True:
+            try:
+                return await super().__call__(method, request_timeout=request_timeout)
+            except TelegramRetryAfter as exc:
+                if not isinstance(method, RETRYABLE_STARTUP_METHODS):
+                    raise
+                logger.warning(
+                    "Telegram 429 під час %s: повторна спроба через %s с",
+                    method.__api_method__,
+                    exc.retry_after,
+                )
+                await asyncio.sleep(exc.retry_after)
+            except TelegramConflictError:
+                self.conflict.set()
+                raise
+            finally:
+                if isinstance(method, GetUpdates):
+                    self.db.set_meta("heartbeat_polling", stamp(datetime.now(UTC)))
 
 
 async def run(config: Config) -> None:
