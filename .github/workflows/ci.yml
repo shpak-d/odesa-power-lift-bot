@@ -18,7 +18,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
       - run: pytest -q
-      - run: cp .env.example .env && docker compose config --quiet
+      - run: cp .env.example .env && docker compose --profile telegram config --quiet
       - run: docker build -t odesa-power-lift:test .
       - name: Check SQLite volume and healthcheck inside the image
         run: |

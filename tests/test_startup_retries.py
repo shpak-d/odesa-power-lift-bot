@@ -216,6 +216,7 @@ async def test_initialization_fills_cache_for_real_aiogram_polling(
         if isinstance(method, GetUpdates):
             assert method.timeout == 50
             assert request_timeout > method.timeout
+            assert method.allowed_updates == ["message", "callback_query"]
             polling.set()
             await asyncio.Event().wait()
         if isinstance(method, SetMyCommands):

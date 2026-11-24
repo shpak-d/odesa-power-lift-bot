@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import html
 import logging
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
@@ -108,9 +107,6 @@ def day_report(db: Database, day: date, config: Config, now: datetime, *, lift_o
                 parts.append(
                     f"⚠️ Дані черги {schedule.queue} застаріли: актуальність не підтверджено."
                 )
-    sources = sorted({s.source for s in (home, secondary) if s})
-    if sources:
-        parts.append("Джерело: " + ", ".join(html.escape(s) for s in sources))
     parts.append(
         "Це прогноз за графіком, а не фактичний статус ліфта чи живлення. "
         "Аварійні відключення можливі поза планом. Час — Europe/Kyiv."
@@ -136,7 +132,6 @@ def change_events(
             f"Стало:\n{schedule_lines(after, after.day, config)}\n\n"
             f"🛗 Можливий простій ліфта:\n{lift_lines(home, secondary, after.day, config)}\n\n"
             f"Отримано: {now.astimezone(config.timezone):%d.%m.%Y %H:%M}.\n"
-            f"Джерело: {html.escape(after.source)}\n"
             "Розрахунок за графіком, не фактичний статус ліфта."
         )
         for chat_id in config.allowed_chat_ids:

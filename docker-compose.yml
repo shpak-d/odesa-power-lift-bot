@@ -29,5 +29,32 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+  telegram:
+    build: .
+    container_name: odesa-power-lift-telegram
+    profiles: [telegram]
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/bot.sqlite3
+      TZ: Europe/Kyiv
+      APP_MODE: telegram
+    volumes:
+      - telegram_data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   bot_data:
+  telegram_data:

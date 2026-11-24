@@ -7,11 +7,12 @@ from typing import Any
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from config import OPERATOR_NAMES, Config
 from database import Database
 from notifications import day_report
+from telegram_messages import MessagePanel
 from telegram_ui import navigation_keyboard
 
 HELP = (
@@ -23,8 +24,8 @@ HELP = (
     "/status — стан перевірок і доставки повідомлень\n"
     "/ping — перевірити, чи бот відповідає\n"
     "/help — допомога\n\n"
-    "За зміни графіка надходить повідомлення, щодня — ранковий звіт. "
-    "Попередження надходять перед плановим відключенням квартири та можливим простоєм ліфта. "
+    "Цей допис оновлюється при зміні графіка, для ранкового звіту й нагадувань. "
+    "Кнопки під дописом перемикають його вміст. "
     "Доступ обмежено дозволеними Chat ID. Для отримання приватних повідомлень натисніть /start.\n\n"
     "Це прогноз, а не фактичний стан ліфта. Відсутність графіка не означає наявності світла."
 )
@@ -40,43 +41,52 @@ class AllowedChatsMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if not isinstance(event, Message) or event.chat.id not in self.allowed:
+        message = event.message if isinstance(event, CallbackQuery) else event
+        if not isinstance(message, Message) or message.chat.id not in self.allowed:
             return None
         return await handler(event, data)
 
 
-def create_router(config: Config, db: Database) -> Router:
+def create_router(config: Config, db: Database, panel: MessagePanel | None = None) -> Router:
     router = Router()
     router.message.outer_middleware(AllowedChatsMiddleware(config.allowed_chat_ids))
+    router.callback_query.outer_middleware(AllowedChatsMiddleware(config.allowed_chat_ids))
     keyboard = navigation_keyboard()
+
+    async def respond(message: Message, text: str, *, force: bool = False) -> None:
+        nonlocal panel
+        if panel is None:
+            panel = MessagePanel(db, message.bot)
+        await panel.send_message(message.chat.id, text, reply_markup=keyboard, force=force)
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
-        await message.answer("Моніторинг налаштовано.\n\n" + HELP, reply_markup=keyboard)
+        await respond(message, "Моніторинг налаштовано.\n\n" + HELP, force=True)
 
     @router.message(Command("menu"))
     async def menu(message: Message) -> None:
-        await message.answer(
+        await respond(
+            message,
             "Оберіть дію кнопками нижче.\n\n"
             "«Перевірити бота» — швидка перевірка відповіді.\n"
             "«Стан моніторингу» — актуальність графіків і стан доставки.",
-            reply_markup=keyboard,
+            force=True,
         )
 
     @router.message(Command("ping"))
     @router.message(F.text == "Перевірити бота")
     async def ping(message: Message) -> None:
         now = datetime.now(UTC).astimezone(config.timezone)
-        await message.answer(
+        await respond(
+            message,
             f"✅ Бот працює.\nВідповідь сформовано: {now:%d.%m.%Y %H:%M:%S} (Київ).\n\n"
             "Стан графіків і перевірок: /status.",
-            reply_markup=keyboard,
         )
 
     async def report(message: Message, offset: int = 0) -> None:
         now = datetime.now(UTC)
         day = now.astimezone(config.timezone).date() + timedelta(days=offset)
-        await message.answer(day_report(db, day, config, now), reply_markup=keyboard)
+        await respond(message, day_report(db, day, config, now))
 
     @router.message(Command("today"))
     @router.message(F.text == "Сьогодні")
@@ -92,11 +102,11 @@ def create_router(config: Config, db: Database) -> Router:
     @router.message(F.text == "Ліфт")
     async def lift(message: Message) -> None:
         now = datetime.now(UTC)
+        reports = []
         for offset in (0, 1):
             day = now.astimezone(config.timezone).date() + timedelta(days=offset)
-            await message.answer(
-                day_report(db, day, config, now, lift_only=True), reply_markup=keyboard
-            )
+            reports.append(day_report(db, day, config, now, lift_only=True))
+        await respond(message, "\n\n".join(reports))
 
     @router.message(Command("status"))
     @router.message(F.text == "Стан моніторингу")
@@ -117,9 +127,16 @@ def create_router(config: Config, db: Database) -> Router:
         )
         counts = db.delivery_counts()
         error = html.escape(db.get_meta("last_error") or "немає")
+        today = datetime.now(UTC).astimezone(config.timezone).date()
+        sources = sorted({
+            schedule.source
+            for schedule in db.range(config.operator_id, today, today + timedelta(days=1))
+        })
+        source_urls = "\n".join(html.escape(source) for source in sources)
         text = (
             f"<b>Стан моніторингу</b>\n\nОператор: {OPERATOR_NAMES[config.operator_id]}\n"
             f"Джерело: {config.provider}\nЧерги: {', '.join(config.queues)}\n"
+            + (f"{source_urls}\n" if source_urls else "") +
             f"Перевірка кожні {config.check_interval_minutes} хв.\n"
             f"Остання спроба: {formatted('last_check')}\n"
             f"Успішне отримання: {formatted('last_success')}\n"
@@ -131,11 +148,22 @@ def create_router(config: Config, db: Database) -> Router:
             "Невизначені доставки не повторюємо автоматично, щоб не створювати дублі.\n"
             "Дати та час публікації кожного графіка: /today, /tomorrow."
         )
-        await message.answer(text, reply_markup=keyboard)
+        await respond(message, text)
 
     @router.message(Command("help"))
     @router.message(F.text == "Допомога")
     async def help_command(message: Message) -> None:
-        await message.answer(HELP, reply_markup=keyboard)
+        await respond(message, HELP)
+
+    actions = {
+        "today": today, "tomorrow": tomorrow, "lift": lift,
+        "status": status, "ping": ping, "help": help_command,
+    }
+
+    @router.callback_query(F.data.in_({f"nav:{action}" for action in actions}))
+    async def navigate(query: CallbackQuery) -> None:
+        # Acknowledge the button without adding a message to chat history.
+        await query.answer()
+        await actions[query.data.removeprefix("nav:")](query.message)
 
     return router

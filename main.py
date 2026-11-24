@@ -20,6 +20,7 @@ from monitor import Monitor
 from notifications import NotificationDispatcher
 from schedule_provider import HttpScheduleProvider
 from telegram_client import GuardedBot
+from telegram_messages import MessagePanel
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,10 @@ class RedactingFormatter(logging.Formatter):
         return value
 
 
-async def telegram_loop(bot: GuardedBot, config: Config, db: Database, monitor: Monitor) -> None:
+async def telegram_loop(
+    bot: GuardedBot, config: Config, db: Database, monitor: Monitor,
+    panel: MessagePanel | None = None,
+) -> None:
     # me() заповнює кеш; start_polling() використає його без другого getMe.
     await bot.me()
     webhook = await bot.get_webhook_info(request_timeout=20)
@@ -59,7 +63,7 @@ async def telegram_loop(bot: GuardedBot, config: Config, db: Database, monitor: 
         request_timeout=20,
     )
     dispatcher = Dispatcher()
-    dispatcher.include_router(create_router(config, db))
+    dispatcher.include_router(create_router(config, db, panel))
     tasks = [asyncio.create_task(monitor.notification_loop(), name="notifications")]
     try:
         tasks.append(asyncio.create_task(
@@ -70,7 +74,7 @@ async def telegram_loop(bot: GuardedBot, config: Config, db: Database, monitor: 
                 backoff_config=BackoffConfig(min_delay=10, max_delay=300, factor=2, jitter=1),
                 handle_signals=False,
                 close_bot_session=False,
-                allowed_updates=["message"],
+                allowed_updates=["message", "callback_query"],
                 tasks_shutdown_timeout=5,
             ),
             name="telegram-polling",
@@ -108,18 +112,21 @@ async def run(config: Config) -> None:
         )
         try:
             async with httpx.AsyncClient() as client:
+                panel = MessagePanel(db, bot)
                 monitor = Monitor(
                     config,
                     db,
                     HttpScheduleProvider(config, client),
-                    NotificationDispatcher(db, bot),
+                    NotificationDispatcher(db, panel),
                 )
                 retry = db.get_meta("source_retry_at")
                 if not retry or datetime.now(UTC) >= datetime.fromisoformat(retry):
                     await monitor.check()
                 tasks = [
                     asyncio.create_task(monitor.monitor_loop(), name="monitor"),
-                    asyncio.create_task(telegram_loop(bot, config, db, monitor), name="polling"),
+                    asyncio.create_task(
+                        telegram_loop(bot, config, db, monitor, panel), name="polling",
+                    ),
                     asyncio.create_task(bot.diagnostics_loop(), name="telegram-diagnostics"),
                     asyncio.create_task(conflict.wait(), name="conflict"),
                     asyncio.create_task(stop.wait(), name="shutdown"),

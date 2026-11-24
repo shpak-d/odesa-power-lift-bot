@@ -1,16 +1,22 @@
-"""Shared Telegram navigation attached to existing messages."""
+"""Inline navigation keeps the chat clean and allows editing the same post."""
 
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def navigation_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Сьогодні"), KeyboardButton(text="Завтра")],
-            [KeyboardButton(text="Ліфт"), KeyboardButton(text="Стан моніторингу")],
-            [KeyboardButton(text="Перевірити бота"), KeyboardButton(text="Допомога")],
+def navigation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Сьогодні", callback_data="nav:today"),
+                InlineKeyboardButton(text="Завтра", callback_data="nav:tomorrow"),
+            ],
+            [
+                InlineKeyboardButton(text="Ліфт", callback_data="nav:lift"),
+                InlineKeyboardButton(text="Стан моніторингу", callback_data="nav:status"),
+            ],
+            [
+                InlineKeyboardButton(text="Перевірити бота", callback_data="nav:ping"),
+                InlineKeyboardButton(text="Допомога", callback_data="nav:help"),
+            ],
         ],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Оберіть дію або введіть /menu",
     )
