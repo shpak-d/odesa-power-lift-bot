@@ -107,10 +107,6 @@ def day_report(db: Database, day: date, config: Config, now: datetime, *, lift_o
                 parts.append(
                     f"⚠️ Дані черги {schedule.queue} застаріли: актуальність не підтверджено."
                 )
-    parts.append(
-        "Це прогноз за графіком, а не фактичний статус ліфта чи живлення. "
-        "Аварійні відключення можливі поза планом. Час — Europe/Kyiv."
-    )
     return "\n\n".join(parts)
 
 
@@ -204,6 +200,7 @@ class NotificationDispatcher:
             try:
                 await self.sender.send_message(
                     chat_id=chat_id, text=row["body"], parse_mode="HTML", request_timeout=20,
+                    disable_notification=False,
                     reply_markup=navigation_keyboard(),
                 )
             except TelegramRetryAfter as exc:

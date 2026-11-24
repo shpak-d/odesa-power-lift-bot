@@ -117,7 +117,7 @@ async def run(config: Config) -> None:
                     config,
                     db,
                     HttpScheduleProvider(config, client),
-                    NotificationDispatcher(db, panel),
+                    NotificationDispatcher(db, bot),
                 )
                 retry = db.get_meta("source_retry_at")
                 if not retry or datetime.now(UTC) >= datetime.fromisoformat(retry):

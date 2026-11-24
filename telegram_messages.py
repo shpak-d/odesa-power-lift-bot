@@ -1,4 +1,4 @@
-"""One persistent, editable bot post per chat, shared by commands and outbox."""
+"""One persistent, editable navigation post per chat; alerts are sent separately."""
 
 from __future__ import annotations
 

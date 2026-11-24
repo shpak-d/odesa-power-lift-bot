@@ -60,7 +60,7 @@ async def test_message_identity_and_content_survive_database_restart(config, tra
         db.close()
 
 
-async def test_concurrent_commands_and_notifications_do_not_create_parallel_posts(db, transport):
+async def test_concurrent_commands_do_not_create_parallel_menu_posts(db, transport):
     in_flight, peak = 0, 0
 
     async def respond(**kwargs):
@@ -134,18 +134,29 @@ async def test_explicit_menu_can_recreate_a_removed_post_with_unchanged_content(
     assert transport.edit_message_text.await_args.kwargs["message_id"] == 100
 
 
-async def test_outbox_replaces_command_post_and_keeps_delivery_state(db, transport, now):
+@pytest.mark.parametrize("kind", ["morning", "change", "warning_home", "warning_lift"])
+async def test_outbox_sends_permanent_alerts_and_preserves_menu(db, transport, now, kind):
     panel = MessagePanel(db, transport)
     await panel.send_message(123, "Меню")
+    transport.send_message.return_value = SimpleNamespace(message_id=100)
     db.enqueue([
-        Event("test-warning", "morning", 123, now, now + timedelta(hours=1), "Нагадування"),
+        Event(f"{kind}-{i}", kind, 123, now, now + timedelta(hours=1), "Нагадування")
+        for i in range(2)
     ])
-    await NotificationDispatcher(db, panel).dispatch(now)
-    transport.send_message.assert_awaited_once()
+    dispatcher = NotificationDispatcher(db, transport)
+    await dispatcher.dispatch(now)
+    await dispatcher.dispatch(now)
+    assert transport.send_message.await_count == 3  # Menu and two distinct events.
+    transport.edit_message_text.assert_not_awaited()
+    for call in transport.send_message.await_args_list[1:]:
+        assert call.kwargs["text"] == "Нагадування"
+        assert call.kwargs["disable_notification"] is False
+    # A later command still edits the menu, never a notification.
+    await panel.send_message(123, "Завтра")
     transport.edit_message_text.assert_awaited_once()
     assert transport.edit_message_text.await_args.kwargs["message_id"] == 99
-    assert transport.edit_message_text.await_args.kwargs["text"] == "Нагадування"
-    assert db.delivery_counts() == {"sent": 1}
+    assert transport.edit_message_text.await_args.kwargs["text"] == "Завтра"
+    assert db.delivery_counts() == {"sent": 2}
 
 
 async def test_distinct_chats_and_tokens_do_not_share_message_ids(db, transport):

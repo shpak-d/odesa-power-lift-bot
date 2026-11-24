@@ -1,5 +1,7 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,7 +16,7 @@ from aiogram.exceptions import (
 from aiogram.methods import GetMe, GetUpdates, GetWebhookInfo, SendMessage, SetMyCommands
 from aiogram.types import BotCommand, BotFullInfo
 
-from main import telegram_loop
+from main import run, telegram_loop
 from telegram_client import GuardedBot, TelegramCooldown
 
 
@@ -248,10 +250,6 @@ async def test_initialization_fills_cache_for_real_aiogram_polling(
 
 
 async def test_startup_backoff_does_not_block_monitor_or_shutdown(config, monkeypatch):
-    from dataclasses import replace
-
-    from main import run
-
     monitor_running = asyncio.Event()
 
     async def monitor_loop(self):
@@ -271,3 +269,27 @@ async def test_startup_backoff_does_not_block_monitor_or_shutdown(config, monkey
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=2)
+
+
+async def test_startup_routes_morning_alerts_separately_from_menu(config, now, monkeypatch):
+    send = AsyncMock(side_effect=[
+        SimpleNamespace(message_id=99), SimpleNamespace(message_id=100),
+    ])
+    edit = AsyncMock(return_value=True)
+
+    async def telegram_loop(bot, config, db, monitor, panel):
+        assert monitor.dispatcher.sender is bot
+        await panel.send_message(123, "Меню")
+        await monitor.tick(now + timedelta(hours=1))
+        await panel.send_message(123, "Завтра")
+
+    monkeypatch.setattr("main.Monitor.check", AsyncMock(return_value=False))
+    monkeypatch.setattr("main.telegram_loop", telegram_loop)
+    monkeypatch.setattr(Bot, "send_message", send)
+    monkeypatch.setattr(Bot, "edit_message_text", edit)
+    await asyncio.wait_for(run(replace(config, app_mode="telegram")), timeout=3)
+    assert send.await_count == 2
+    assert "Електроенергія" in send.await_args_list[1].kwargs["text"]
+    assert send.await_args_list[1].kwargs["disable_notification"] is False
+    edit.assert_awaited_once()
+    assert edit.await_args.kwargs["message_id"] == 99

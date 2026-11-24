@@ -28,6 +28,7 @@ async def test_warning_once_after_restart(config, make_schedule, now):
     await NotificationDispatcher(db, sender).dispatch(due)
     assert len(sender.messages) == 2  # квартира + ліфт
     assert all(message["reply_markup"].inline_keyboard for message in sender.messages)
+    assert all(message["disable_notification"] is False for message in sender.messages)
     db.close()
     db = Database(config.database_path)
     try:
@@ -36,6 +37,41 @@ async def test_warning_once_after_restart(config, make_schedule, now):
         assert len(sender.messages) == 2
     finally:
         db.close()
+
+
+async def test_home_and_lift_warn_15_minutes_before_their_own_start(
+    config, db, make_schedule, now,
+):
+    provider = StaticProvider([
+        make_schedule("2.1", (("10:00", "14:00"),), day=s.day)
+        if s.queue == "2.1"
+        else make_schedule("4.1", (("11:00", "15:00"),), day=s.day)
+        for s in batch(make_schedule)
+    ])
+    sender = RecordingSender()
+    monitor = Monitor(config, db, provider, NotificationDispatcher(db, sender))
+    # The morning report has already been delivered.
+    await monitor.check(now + timedelta(hours=1))
+    await monitor.tick(now + timedelta(hours=1))
+    sender.messages.clear()
+    home_due = now + timedelta(hours=2, minutes=45)  # 09:45 Kyiv.
+    await monitor.check(home_due - timedelta(seconds=1))
+    await monitor.tick(home_due - timedelta(seconds=1))
+    assert not sender.messages
+    await monitor.tick(home_due)
+    assert len(sender.messages) == 1
+    assert "Планове відключення квартири" in sender.messages[0]["text"]
+    assert "24.11.2026 10:00" in sender.messages[0]["text"]
+    lift_due = home_due + timedelta(hours=1)  # 10:45 Kyiv.
+    await monitor.check(lift_due - timedelta(seconds=1))
+    await monitor.tick(lift_due - timedelta(seconds=1))
+    assert len(sender.messages) == 1
+    await monitor.tick(lift_due)
+    await monitor.tick(lift_due + timedelta(seconds=5))
+    assert len(sender.messages) == 2
+    assert "Можливий простій ліфта" in sender.messages[1]["text"]
+    assert "24.11.2026 11:00" in sender.messages[1]["text"]
+    assert all(message["disable_notification"] is False for message in sender.messages)
 
 
 def test_schedule_change_cancels_old_and_restores_new_reminders(config, db, make_schedule, now):

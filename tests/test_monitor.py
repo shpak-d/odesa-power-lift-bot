@@ -102,10 +102,13 @@ async def test_morning_report_once_per_chat_after_restart(config, make_schedule,
     monitor, _, sender = setup_monitor(config, database, make_schedule)
     eight = now + timedelta(hours=1)
     await monitor.check(eight)
+    await monitor.tick(eight - timedelta(seconds=1))
+    assert not sender.messages
     await monitor.tick(eight)
     await monitor.tick(eight + timedelta(seconds=5))
     assert len(sender.messages) == 1
     assert "Електроенергія — 24.11.2026" in sender.messages[0]["text"]
+    assert sender.messages[0]["disable_notification"] is False
     database.close()
     database = Database(config.database_path)
     try:
@@ -114,3 +117,12 @@ async def test_morning_report_once_per_chat_after_restart(config, make_schedule,
         assert not after_restart.messages
     finally:
         database.close()
+
+
+@pytest.mark.parametrize("lift_only", [False, True])
+def test_daily_report_omits_forecast_footer(config, db, make_schedule, now, lift_only):
+    db.apply_schedules(batch(make_schedule), now, lambda _: [])
+    text = day_report(db, now.astimezone(config.timezone).date(), config, now, lift_only=lift_only)
+    assert "10:00–14:00" in text
+    assert "Це прогноз за графіком" not in text
+    assert "Аварійні відключення можливі поза планом" not in text
