@@ -7,23 +7,21 @@ import signal
 from datetime import UTC, datetime
 
 import httpx
-from aiogram import Bot, Dispatcher
+from aiogram import Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramConflictError, TelegramNetworkError, TelegramRetryAfter
-from aiogram.methods import GetMe, GetUpdates, GetWebhookInfo, SetMyCommands
 from aiogram.types import BotCommand
+from aiogram.utils.backoff import BackoffConfig
 
 from bot import create_router
 from config import Config
-from database import Database, stamp
+from database import Database
 from instance_lock import InstanceLock
 from monitor import Monitor
 from notifications import NotificationDispatcher
 from schedule_provider import HttpScheduleProvider
+from telegram_client import GuardedBot
 
 logger = logging.getLogger(__name__)
-# Також охоплює getMe з bot.me() при запуску polling в aiogram.
-RETRYABLE_STARTUP_METHODS = (GetMe, GetWebhookInfo, SetMyCommands)
 
 
 class RedactingFormatter(logging.Formatter):
@@ -38,41 +36,52 @@ class RedactingFormatter(logging.Formatter):
         return value
 
 
-class GuardedBot(Bot):
-    def __init__(self, *args, db: Database, conflict: asyncio.Event, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.db, self.conflict = db, conflict
-
-    async def __call__(self, method, request_timeout=None):
-        network_retry_delay = 5
-        while True:
-            try:
-                return await super().__call__(method, request_timeout=request_timeout)
-            except TelegramRetryAfter as exc:
-                if not isinstance(method, RETRYABLE_STARTUP_METHODS):
-                    raise
-                logger.warning(
-                    "Telegram 429 під час %s: повторна спроба через %s с",
-                    method.__api_method__,
-                    exc.retry_after,
-                )
-                await asyncio.sleep(exc.retry_after)
-            except TelegramNetworkError:
-                if not isinstance(method, RETRYABLE_STARTUP_METHODS):
-                    raise
-                logger.warning(
-                    "Мережева помилка Telegram під час %s: повторна спроба через %s с",
-                    method.__api_method__,
-                    network_retry_delay,
-                )
-                await asyncio.sleep(network_retry_delay)
-                network_retry_delay = min(network_retry_delay * 2, 60)
-            except TelegramConflictError:
-                self.conflict.set()
-                raise
-            finally:
-                if isinstance(method, GetUpdates):
-                    self.db.set_meta("heartbeat_polling", stamp(datetime.now(UTC)))
+async def telegram_loop(bot: GuardedBot, config: Config, db: Database, monitor: Monitor) -> None:
+    # me() заповнює кеш; start_polling() використає його без другого getMe.
+    await bot.me()
+    webhook = await bot.get_webhook_info(request_timeout=20)
+    if webhook.url:
+        raise RuntimeError(
+            "Для цього токена налаштовано webhook. Спочатку зупиніть "
+            "інший сервіс і видаліть webhook свідомо."
+        )
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Початок роботи"),
+            BotCommand(command="today", description="Графік на сьогодні"),
+            BotCommand(command="tomorrow", description="Графік на завтра"),
+            BotCommand(command="lift", description="Прогноз ліфта"),
+            BotCommand(command="status", description="Стан моніторингу"),
+            BotCommand(command="help", description="Допомога"),
+        ],
+        request_timeout=20,
+    )
+    dispatcher = Dispatcher()
+    dispatcher.include_router(create_router(config, db))
+    tasks = [asyncio.create_task(monitor.notification_loop(), name="notifications")]
+    try:
+        tasks.append(asyncio.create_task(
+            dispatcher.start_polling(
+                bot,
+                polling_timeout=50,
+                # Fallback for errors outside GuardedBot's transient-error handling.
+                backoff_config=BackoffConfig(min_delay=10, max_delay=300, factor=2, jitter=1),
+                handle_signals=False,
+                close_bot_session=False,
+                allowed_updates=["message"],
+                tasks_shutdown_timeout=5,
+            ),
+            name="telegram-polling",
+        ))
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    finally:
+        with contextlib.suppress(RuntimeError):
+            await dispatcher.stop_polling()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def run(config: Config) -> None:
@@ -106,40 +115,10 @@ async def run(config: Config) -> None:
                 retry = db.get_meta("source_retry_at")
                 if not retry or datetime.now(UTC) >= datetime.fromisoformat(retry):
                     await monitor.check()
-                # getMe перевіряє токен. Бот із webhook не переводимо у polling мовчки.
-                await bot.get_me(request_timeout=20)
-                webhook = await bot.get_webhook_info(request_timeout=20)
-                if webhook.url:
-                    raise RuntimeError(
-                        "Для цього токена налаштовано webhook. Спочатку зупиніть "
-                        "інший сервіс і видаліть webhook свідомо."
-                    )
-                await bot.set_my_commands(
-                    [
-                        BotCommand(command="start", description="Початок роботи"),
-                        BotCommand(command="today", description="Графік на сьогодні"),
-                        BotCommand(command="tomorrow", description="Графік на завтра"),
-                        BotCommand(command="lift", description="Прогноз ліфта"),
-                        BotCommand(command="status", description="Стан моніторингу"),
-                        BotCommand(command="help", description="Допомога"),
-                    ],
-                    request_timeout=20,
-                )
-                dispatcher = Dispatcher()
-                dispatcher.include_router(create_router(config, db))
-                db.set_meta("heartbeat_polling", stamp(datetime.now(UTC)))
                 tasks = [
                     asyncio.create_task(monitor.monitor_loop(), name="monitor"),
-                    asyncio.create_task(monitor.notification_loop(), name="notifications"),
-                    asyncio.create_task(
-                        dispatcher.start_polling(
-                            bot,
-                            handle_signals=False,
-                            close_bot_session=False,
-                            allowed_updates=["message"],
-                        ),
-                        name="polling",
-                    ),
+                    asyncio.create_task(telegram_loop(bot, config, db, monitor), name="polling"),
+                    asyncio.create_task(bot.diagnostics_loop(), name="telegram-diagnostics"),
                     asyncio.create_task(conflict.wait(), name="conflict"),
                     asyncio.create_task(stop.wait(), name="shutdown"),
                 ]
@@ -155,6 +134,7 @@ async def run(config: Config) -> None:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            bot.session.log_summary()
             await bot.session.close()
             db.close()
 

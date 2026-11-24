@@ -23,6 +23,18 @@ def now():
     return datetime(2026, 11, 24, 5, 0, tzinfo=UTC)  # 07:00 Київ
 
 
+@pytest.fixture(autouse=True)
+def notification_wall_clock(now, monkeypatch):
+    # The outbox also checks wall time after sends. Historical fixtures must not
+    # expire simply because pytest runs later in the day or on another date.
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("notifications.datetime", FixedDateTime)
+
+
 @pytest.fixture
 def db(config):
     result = Database(config.database_path)

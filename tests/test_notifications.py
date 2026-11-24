@@ -134,6 +134,21 @@ async def test_known_rate_limit_retries(config, db, make_schedule, now):
     assert len(sender.messages) == 1
 
 
+async def test_rate_limit_preserves_longer_shared_backoff(config, db, make_schedule, now):
+    save(db, make_schedule, now)
+    event = warning_events(db, config, now)[0]
+    db.enqueue([event])
+    shared_retry = event.due_at + timedelta(minutes=5)
+    db.set_meta("telegram_retry_at", shared_retry.isoformat())
+    error = TelegramRetryAfter(
+        method=SendMessage(chat_id=123, text="x"), message="Retry", retry_after=7,
+    )
+    await NotificationDispatcher(db, RecordingSender(error)).dispatch(event.due_at)
+    assert db.get_meta("telegram_retry_at") == shared_retry.isoformat()
+    assert not db.due(event.due_at + timedelta(seconds=8))
+    assert len(db.due(shared_retry)) == 1
+
+
 def test_crash_in_flight_does_not_duplicate(config, make_schedule, now):
     db = Database(config.database_path)
     save(db, make_schedule, now)

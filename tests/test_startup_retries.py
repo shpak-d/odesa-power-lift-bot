@@ -1,14 +1,21 @@
 import asyncio
-import logging
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 from aiogram import Bot
-from aiogram.exceptions import TelegramConflictError, TelegramNetworkError, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramConflictError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+    TelegramUnauthorizedError,
+)
 from aiogram.methods import GetMe, GetUpdates, GetWebhookInfo, SendMessage, SetMyCommands
-from aiogram.types import BotCommand, BotFullInfo, WebhookInfo
+from aiogram.types import BotCommand, BotFullInfo
 
-from main import GuardedBot
+from main import telegram_loop
+from telegram_client import GuardedBot, TelegramCooldown
 
 
 @pytest.fixture
@@ -21,331 +28,241 @@ async def guarded_bot(config, db):
 
 
 @pytest.fixture
-def bot_info():
-    return BotFullInfo(
-        id=123456,
-        is_bot=True,
-        first_name="Test bot",
-        can_join_groups=True,
-        can_read_all_group_messages=False,
-        supports_guest_queries=False,
-        supports_inline_queries=False,
-        needs_inline_query_location=False,
-        can_connect_to_business=False,
-        has_main_web_app=False,
-        has_topics_enabled=False,
-        allows_users_to_create_topics=False,
-        has_topic_sidebar=False,
-        can_manage_bots=False,
-        supports_join_request_queries=False,
-    )
+def clock(monkeypatch):
+    class Clock:
+        value = 1000.0
+        delays = None
+
+        def __init__(self):
+            self.delays = []
+
+        async def sleep(self, delay):
+            self.delays.append(delay)
+            self.value += delay
+
+    result = Clock()
+    monkeypatch.setattr("telegram_client.monotonic", lambda: result.value)
+    monkeypatch.setattr("telegram_client.random.uniform", lambda *_: 2)
+    # GuardedBot is created before/after this fixture depending on the test.
+    monkeypatch.setattr("telegram_client.asyncio.sleep", result.sleep)
+    return result
 
 
-@pytest.fixture(params=["get_me", "get_webhook_info", "set_my_commands"])
-def startup_call(request, bot_info):
-    if request.param == "get_me":
-        return (
-            request.param,
-            {},
-            GetMe(),
-            bot_info,
-        )
-    if request.param == "get_webhook_info":
-        return (
-            request.param,
-            {},
-            GetWebhookInfo(),
-            WebhookInfo(
-                url="",
-                has_custom_certificate=False,
-                pending_update_count=0,
-            ),
-        )
-    commands = [BotCommand(command="today", description="Графік на сьогодні")]
-    return request.param, {"commands": commands}, SetMyCommands(commands=commands), True
+@pytest.fixture(params=[
+    GetMe(), GetWebhookInfo(),
+    SetMyCommands(commands=[BotCommand(command="today", description="Today")]),
+    GetUpdates(timeout=50),
+])
+def read_method(request):
+    return request.param
 
 
-@pytest.mark.parametrize("delays", [(7,), (2, 11, 120)])
-async def test_startup_retries_every_429_with_server_delay(
-    guarded_bot,
-    startup_call,
-    delays,
-    monkeypatch,
-    caplog,
+def clear_initial_cooldown(bot):
+    # The fake monotonic clock starts at 1000, unlike the process monotonic clock.
+    bot._retry_at = 0
+
+
+@pytest.mark.parametrize("error_type", [TelegramNetworkError, TelegramServerError])
+async def test_backoff_enters_sparse_recovery_until_success(
+    guarded_bot, read_method, clock, monkeypatch, error_type,
 ):
-    name, kwargs, method, result = startup_call
-    attempts = []
-    responses = iter(
-        [
-            *(
-                TelegramRetryAfter(method=method, message="Flood control", retry_after=delay)
-                for delay in delays
-            ),
-            result,
-        ]
-    )
-
-    async def request(received, request_timeout=None):
-        assert received == method
-        assert request_timeout == 20
-        attempts.append("request")
-        response = next(responses)
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-    async def sleep(delay):
-        attempts.append(delay)
-
-    monkeypatch.setattr(Bot, "__call__", AsyncMock(side_effect=request))
-    pause = AsyncMock(side_effect=sleep)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
-    with caplog.at_level(logging.WARNING, logger="main"):
-        actual = await getattr(guarded_bot, name)(**kwargs, request_timeout=20)
-
-    assert actual == result
-    assert attempts == [item for delay in delays for item in ("request", delay)] + ["request"]
-    assert [call.args[0] for call in pause.await_args_list] == list(delays)
-    assert not guarded_bot.conflict.is_set()
-    assert len(caplog.records) == len(delays)
-    for record, delay in zip(caplog.records, delays, strict=True):
-        assert "Telegram 429" in record.message
-        assert method.__api_method__ in record.message
-        assert f"через {delay} с" in record.message
+    clear_initial_cooldown(guarded_bot)
+    error = error_type(method=read_method, message="Unavailable")
+    request = AsyncMock(side_effect=[*[error] * 9, True])
+    monkeypatch.setattr(Bot, "__call__", request)
+    assert await guarded_bot(read_method, request_timeout=20) is True
+    assert clock.delays == [12, 22, 42, 82, 162, 302, 902, 902, 902]
+    assert request.await_count == 10
+    assert guarded_bot.failures[read_method.__api_method__] == 0
+    # A successful request resets this method's consecutive-failure counter.
+    request.side_effect = [error, True]
+    assert await guarded_bot(read_method) is True
+    assert clock.delays[-1] == 12
 
 
-@pytest.mark.parametrize("after_rate_limit", [False, True])
-async def test_startup_conflict_propagates_without_retry(
-    guarded_bot,
-    startup_call,
-    after_rate_limit,
-    monkeypatch,
+async def test_429_respects_server_minimum_and_does_not_reset_backoff(
+    guarded_bot, read_method, clock, monkeypatch,
 ):
-    name, kwargs, method, _ = startup_call
-    conflict = TelegramConflictError(method=method, message="Other polling instance")
-    responses = [conflict]
-    if after_rate_limit:
-        responses.insert(0, TelegramRetryAfter(method=method, message="Retry", retry_after=5))
-    request = AsyncMock(side_effect=responses)
-    pause = AsyncMock()
+    clear_initial_cooldown(guarded_bot)
+    error = TelegramNetworkError(method=read_method, message="Timeout")
+    request = AsyncMock(side_effect=[
+        error,
+        TelegramRetryAfter(method=read_method, message="Flood", retry_after=137),
+        error,
+        TelegramRetryAfter(method=read_method, message="Flood", retry_after=3),
+        True,
+    ])
     monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
-
-    with pytest.raises(TelegramConflictError) as caught:
-        await getattr(guarded_bot, name)(**kwargs, request_timeout=20)
-
-    assert caught.value is conflict
-    assert guarded_bot.conflict.is_set()
-    assert request.await_count == len(responses)
-    assert pause.await_count == int(after_rate_limit)
+    assert await guarded_bot(read_method) is True
+    assert clock.delays == [12, 139, 42, 82]
 
 
-@pytest.mark.parametrize("method", [GetUpdates(), SendMessage(chat_id=123, text="Test")])
-async def test_other_methods_keep_existing_rate_limit_handling(guarded_bot, method, monkeypatch):
-    error = TelegramRetryAfter(method=method, message="Retry", retry_after=30)
-    request, pause = AsyncMock(side_effect=error), AsyncMock()
+@pytest.mark.parametrize("error_type", [TelegramConflictError, TelegramUnauthorizedError])
+async def test_permanent_errors_propagate_without_retry(
+    guarded_bot, read_method, clock, monkeypatch, error_type,
+):
+    clear_initial_cooldown(guarded_bot)
+    error = error_type(method=read_method, message="Stop")
+    request = AsyncMock(side_effect=error)
     monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
+    with pytest.raises(error_type):
+        await guarded_bot(read_method)
+    request.assert_awaited_once()
+    assert not clock.delays
+    assert guarded_bot.conflict.is_set() == (error_type is TelegramConflictError)
 
-    with pytest.raises(TelegramRetryAfter) as caught:
+
+@pytest.mark.parametrize("error_type", [TelegramRetryAfter, TelegramNetworkError])
+async def test_send_failure_pauses_all_requests_without_replaying_send(
+    guarded_bot, clock, monkeypatch, error_type,
+):
+    clear_initial_cooldown(guarded_bot)
+    method = SendMessage(chat_id=123, text="private message")
+    kwargs = {"retry_after": 30} if error_type is TelegramRetryAfter else {}
+    error = error_type(method=method, message="Failure", **kwargs)
+    request = AsyncMock(side_effect=[error, True])
+    monkeypatch.setattr(Bot, "__call__", request)
+    with pytest.raises(error_type):
         await guarded_bot(method)
-
-    assert caught.value is error
-    request.assert_awaited_once()
-    pause.assert_not_awaited()
-    assert not guarded_bot.conflict.is_set()
-
-
-async def test_implicit_get_me_used_by_polling_also_retries(guarded_bot, bot_info, monkeypatch):
-    request = AsyncMock(
-        side_effect=[
-            TelegramRetryAfter(method=GetMe(), message="Retry", retry_after=9),
-            bot_info,
-        ]
-    )
-    pause = AsyncMock()
-    monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
-
-    assert await guarded_bot.me() == bot_info
-    assert await guarded_bot.me() == bot_info
-    assert request.await_count == 2  # Друга me() читає кеш aiogram.
-    pause.assert_awaited_once_with(9)
-
-
-async def test_startup_retry_wait_remains_cancellable(guarded_bot, monkeypatch):
-    waiting = asyncio.Event()
-
-    async def sleep(delay):
-        assert delay == 300
-        waiting.set()
-        await asyncio.Event().wait()
-
-    request = AsyncMock(
-        side_effect=TelegramRetryAfter(
-            method=GetMe(),
-            message="Retry",
-            retry_after=300,
-        )
-    )
-    monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", sleep)
-    task = asyncio.create_task(guarded_bot.get_me())
-    try:
-        await asyncio.wait_for(waiting.wait(), timeout=1)
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    request.assert_awaited_once()
-
-
-async def test_startup_network_errors_back_off_and_cap_at_60_seconds(
-    guarded_bot,
-    startup_call,
-    monkeypatch,
-    caplog,
-):
-    name, kwargs, method, result = startup_call
-    delays = [5, 10, 20, 40, 60, 60, 60]
-    attempts = []
-    responses = iter(
-        [
-            *(TelegramNetworkError(method=method, message="Request timeout error") for _ in delays),
-            result,
-        ]
-    )
-
-    async def request(received, request_timeout=None):
-        assert received == method
-        assert request_timeout == 20
-        attempts.append("request")
-        response = next(responses)
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-    async def sleep(delay):
-        attempts.append(delay)
-
-    monkeypatch.setattr(Bot, "__call__", AsyncMock(side_effect=request))
-    monkeypatch.setattr("main.asyncio.sleep", AsyncMock(side_effect=sleep))
-    with caplog.at_level(logging.WARNING, logger="main"):
-        assert await getattr(guarded_bot, name)(**kwargs, request_timeout=20) == result
-
-    assert attempts == [item for delay in delays for item in ("request", delay)] + ["request"]
-    assert not guarded_bot.conflict.is_set()
-    assert len(caplog.records) == len(delays)
-    for record, delay in zip(caplog.records, delays, strict=True):
-        assert "Мережева помилка Telegram" in record.message
-        assert method.__api_method__ in record.message
-        assert f"через {delay} с" in record.message
-
-
-async def test_network_backoff_restarts_for_each_new_call(guarded_bot, startup_call, monkeypatch):
-    name, kwargs, method, result = startup_call
-    error = TelegramNetworkError(method=method, message="Request timeout error")
-    request = AsyncMock(side_effect=[error, error, result, error, result])
-    pause = AsyncMock()
-    monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
-
-    for _ in range(2):
-        assert await getattr(guarded_bot, name)(**kwargs, request_timeout=20) == result
-
-    assert [call.args[0] for call in pause.await_args_list] == [5, 10, 5]
-    assert request.await_count == 5
-
-
-async def test_429_keeps_server_delay_between_network_retries(
-    guarded_bot,
-    startup_call,
-    monkeypatch,
-):
-    name, kwargs, method, result = startup_call
-    network_error = TelegramNetworkError(method=method, message="Request timeout error")
-    request = AsyncMock(
-        side_effect=[
-            network_error,
-            TelegramRetryAfter(method=method, message="Flood control", retry_after=137),
-            network_error,
-            TelegramRetryAfter(method=method, message="Flood control", retry_after=3),
-            network_error,
-            result,
-        ]
-    )
-    pause = AsyncMock()
-    monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
-
-    assert await getattr(guarded_bot, name)(**kwargs, request_timeout=20) == result
-    assert [call.args[0] for call in pause.await_args_list] == [5, 137, 10, 3, 20]
-    assert not guarded_bot.conflict.is_set()
-
-
-async def test_conflict_after_network_error_still_propagates(
-    guarded_bot,
-    startup_call,
-    monkeypatch,
-):
-    name, kwargs, method, _ = startup_call
-    conflict = TelegramConflictError(method=method, message="Other polling instance")
-    request = AsyncMock(
-        side_effect=[
-            TelegramNetworkError(method=method, message="Request timeout error"),
-            conflict,
-        ]
-    )
-    pause = AsyncMock()
-    monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
-
-    with pytest.raises(TelegramConflictError) as caught:
-        await getattr(guarded_bot, name)(**kwargs, request_timeout=20)
-
-    assert caught.value is conflict
-    assert guarded_bot.conflict.is_set()
+    with pytest.raises(TelegramCooldown):
+        await guarded_bot(method)
+    request.assert_awaited_once()  # Local rejection is not another HTTP request.
+    assert not clock.delays
+    assert await guarded_bot(GetUpdates(timeout=50)) is True
+    assert clock.delays == [32 if kwargs else 12]
     assert request.await_count == 2
-    pause.assert_awaited_once_with(5)
 
 
-@pytest.mark.parametrize("method", [GetUpdates(), SendMessage(chat_id=123, text="Test")])
-async def test_other_methods_keep_existing_network_error_handling(guarded_bot, method, monkeypatch):
-    error = TelegramNetworkError(method=method, message="Request timeout error")
-    request, pause = AsyncMock(side_effect=error), AsyncMock()
+async def test_shared_cooldown_survives_process_restart(config, db, monkeypatch):
+    db.set_meta("telegram_retry_at", (datetime.now(UTC) + timedelta(minutes=5)).isoformat())
+    bot = GuardedBot(config.bot_token, db=db, conflict=asyncio.Event())
+    request = AsyncMock()
     monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", pause)
-
-    with pytest.raises(TelegramNetworkError) as caught:
-        await guarded_bot(method)
-
-    assert caught.value is error
-    request.assert_awaited_once()
-    pause.assert_not_awaited()
-    assert not guarded_bot.conflict.is_set()
+    try:
+        with pytest.raises(TelegramCooldown) as caught:
+            await bot.send_message(123, "Test")
+        assert 295 <= caught.value.retry_after <= 300
+        request.assert_not_awaited()
+    finally:
+        await bot.session.close()
 
 
-async def test_network_retry_wait_remains_cancellable(guarded_bot, monkeypatch):
-    waiting = asyncio.Event()
+async def test_retry_sleep_is_cancellable(guarded_bot, monkeypatch):
+    sleeping = asyncio.Event()
 
     async def sleep(delay):
-        assert delay == 5
-        waiting.set()
+        assert delay >= 300
+        sleeping.set()
         await asyncio.Event().wait()
 
-    request = AsyncMock(
-        side_effect=TelegramNetworkError(
-            method=GetMe(),
-            message="Request timeout error",
-        )
-    )
+    request = AsyncMock(side_effect=TelegramRetryAfter(
+        method=GetMe(), message="Flood", retry_after=300,
+    ))
     monkeypatch.setattr(Bot, "__call__", request)
-    monkeypatch.setattr("main.asyncio.sleep", sleep)
-    task = asyncio.create_task(guarded_bot.get_me())
+    monkeypatch.setattr("telegram_client.asyncio.sleep", sleep)
+    task = asyncio.create_task(guarded_bot.me())
     try:
-        await asyncio.wait_for(waiting.wait(), timeout=1)
+        await asyncio.wait_for(sleeping.wait(), timeout=1)
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
     request.assert_awaited_once()
+
+
+async def test_no_parallel_get_me_or_polling_requests(guarded_bot, monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    in_flight, peak = 0, 0
+
+    async def request(method, request_timeout=None):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        entered.set()
+        await release.wait()
+        in_flight -= 1
+        return []
+
+    mock = AsyncMock(side_effect=request)
+    monkeypatch.setattr(Bot, "__call__", mock)
+    polls = [asyncio.create_task(guarded_bot(GetUpdates(timeout=50))) for _ in range(2)]
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert mock.await_count == 1
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*polls), timeout=1)
+    assert peak == 1
+    # Concurrent consumers of me() share one cache fill.
+    assert await asyncio.gather(guarded_bot.me(), guarded_bot.me()) == [[], []]
+    assert mock.await_count == 3
+
+
+async def test_initialization_fills_cache_for_real_aiogram_polling(
+    guarded_bot, config, db, monkeypatch,
+):
+    # model_construct keeps this test independent of unrelated Bot API capability fields.
+    info = BotFullInfo.model_construct(id=123456, is_bot=True, first_name="Test bot")
+    calls, polling, scheduler = [], asyncio.Event(), asyncio.Event()
+
+    async def request(method, request_timeout=None):
+        calls.append(method.__api_method__)
+        if isinstance(method, GetMe):
+            return info
+        if isinstance(method, GetWebhookInfo):
+            from aiogram.types import WebhookInfo
+
+            return WebhookInfo(url="", has_custom_certificate=False, pending_update_count=0)
+        if isinstance(method, GetUpdates):
+            assert method.timeout == 50
+            assert request_timeout > method.timeout
+            polling.set()
+            await asyncio.Event().wait()
+        return True
+
+    async def notification_loop():
+        scheduler.set()
+        await asyncio.Event().wait()
+
+    monitor = AsyncMock()
+    monitor.notification_loop.side_effect = notification_loop
+    monkeypatch.setattr(Bot, "__call__", AsyncMock(side_effect=request))
+    task = asyncio.create_task(telegram_loop(guarded_bot, config, db, monitor))
+    try:
+        await asyncio.wait_for(polling.wait(), timeout=2)
+        await asyncio.wait_for(scheduler.wait(), timeout=1)
+        assert calls == ["getMe", "getWebhookInfo", "setMyCommands", "getUpdates"]
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    assert not any(
+        t.get_name() in {"notifications", "telegram-polling"} and not t.done()
+        for t in asyncio.all_tasks()
+    )
+
+
+async def test_startup_backoff_does_not_block_monitor_or_shutdown(config, monkeypatch):
+    from dataclasses import replace
+
+    from main import run
+
+    monitor_running = asyncio.Event()
+
+    async def monitor_loop(self):
+        monitor_running.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("main.Monitor.check", AsyncMock(return_value=False))
+    monkeypatch.setattr("main.Monitor.monitor_loop", monitor_loop)
+    monkeypatch.setattr(Bot, "__call__", AsyncMock(side_effect=TelegramNetworkError(
+        method=GetMe(), message="Unavailable",
+    )))
+    task = asyncio.create_task(run(replace(config, app_mode="telegram")))
+    try:
+        await asyncio.wait_for(monitor_running.wait(), timeout=3)
+        assert not task.done()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)

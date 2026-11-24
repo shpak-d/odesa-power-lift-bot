@@ -210,9 +210,14 @@ class NotificationDispatcher:
                     chat_id=chat_id, text=row["body"], parse_mode="HTML", request_timeout=20
                 )
             except TelegramRetryAfter as exc:
-                retry = now + timedelta(seconds=exc.retry_after)
+                # The request itself may have taken time. Preserve the longer shared
+                # cooldown (including backoff/jitter) installed by GuardedBot.
+                retry = max(now, datetime.now(UTC)) + timedelta(seconds=exc.retry_after)
+                shared_retry = self.db.get_meta("telegram_retry_at")
+                if shared_retry:
+                    retry = max(retry, datetime.fromisoformat(shared_retry))
                 self.db.finish(key, chat_id, "pending", now, "Ліміт Telegram", retry)
-                # Retry-After стосується всього бота, а не лише одного чату.
+                # Спільна локальна пауза зменшує навантаження з усіх чатів.
                 self.db.set_meta("telegram_retry_at", retry.isoformat())
                 return
             except (TelegramForbiddenError, TelegramBadRequest):
