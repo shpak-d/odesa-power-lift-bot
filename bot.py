@@ -7,18 +7,21 @@ from typing import Any
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, TelegramObject
+from aiogram.types import Message, TelegramObject
 
 from config import OPERATOR_NAMES, Config
 from database import Database
 from notifications import day_report
+from telegram_ui import navigation_keyboard
 
 HELP = (
     "Бот стежить за опублікованими графіками двох ліній живлення.\n\n"
+    "/menu — показати кнопки керування\n"
     "/today — графік на сьогодні\n"
     "/tomorrow — графік на завтра\n"
     "/lift — прогноз простою ліфта на сьогодні й завтра\n"
     "/status — стан перевірок і доставки повідомлень\n"
+    "/ping — перевірити, чи бот відповідає\n"
     "/help — допомога\n\n"
     "За зміни графіка надходить повідомлення, щодня — ранковий звіт. "
     "Попередження надходять перед плановим відключенням квартири та можливим простоєм ліфта. "
@@ -45,23 +48,35 @@ class AllowedChatsMiddleware(BaseMiddleware):
 def create_router(config: Config, db: Database) -> Router:
     router = Router()
     router.message.outer_middleware(AllowedChatsMiddleware(config.allowed_chat_ids))
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Сьогодні"), KeyboardButton(text="Завтра")],
-            [KeyboardButton(text="Ліфт"), KeyboardButton(text="Стан моніторингу")],
-            [KeyboardButton(text="Допомога")],
-        ],
-        resize_keyboard=True,
-    )
+    keyboard = navigation_keyboard()
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
         await message.answer("Моніторинг налаштовано.\n\n" + HELP, reply_markup=keyboard)
 
+    @router.message(Command("menu"))
+    async def menu(message: Message) -> None:
+        await message.answer(
+            "Оберіть дію кнопками нижче.\n\n"
+            "«Перевірити бота» — швидка перевірка відповіді.\n"
+            "«Стан моніторингу» — актуальність графіків і стан доставки.",
+            reply_markup=keyboard,
+        )
+
+    @router.message(Command("ping"))
+    @router.message(F.text == "Перевірити бота")
+    async def ping(message: Message) -> None:
+        now = datetime.now(UTC).astimezone(config.timezone)
+        await message.answer(
+            f"✅ Бот працює.\nВідповідь сформовано: {now:%d.%m.%Y %H:%M:%S} (Київ).\n\n"
+            "Стан графіків і перевірок: /status.",
+            reply_markup=keyboard,
+        )
+
     async def report(message: Message, offset: int = 0) -> None:
         now = datetime.now(UTC)
         day = now.astimezone(config.timezone).date() + timedelta(days=offset)
-        await message.answer(day_report(db, day, config, now))
+        await message.answer(day_report(db, day, config, now), reply_markup=keyboard)
 
     @router.message(Command("today"))
     @router.message(F.text == "Сьогодні")
@@ -79,7 +94,9 @@ def create_router(config: Config, db: Database) -> Router:
         now = datetime.now(UTC)
         for offset in (0, 1):
             day = now.astimezone(config.timezone).date() + timedelta(days=offset)
-            await message.answer(day_report(db, day, config, now, lift_only=True))
+            await message.answer(
+                day_report(db, day, config, now, lift_only=True), reply_markup=keyboard
+            )
 
     @router.message(Command("status"))
     @router.message(F.text == "Стан моніторингу")
@@ -114,7 +131,7 @@ def create_router(config: Config, db: Database) -> Router:
             "Невизначені доставки не повторюємо автоматично, щоб не створювати дублі.\n"
             "Дати та час публікації кожного графіка: /today, /tomorrow."
         )
-        await message.answer(text)
+        await message.answer(text, reply_markup=keyboard)
 
     @router.message(Command("help"))
     @router.message(F.text == "Допомога")

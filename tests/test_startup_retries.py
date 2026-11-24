@@ -218,6 +218,10 @@ async def test_initialization_fills_cache_for_real_aiogram_polling(
             assert request_timeout > method.timeout
             polling.set()
             await asyncio.Event().wait()
+        if isinstance(method, SetMyCommands):
+            assert {command.command for command in method.commands} == {
+                "start", "menu", "today", "tomorrow", "lift", "status", "ping", "help",
+            }
         return True
 
     async def notification_loop():

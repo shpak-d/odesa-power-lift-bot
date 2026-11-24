@@ -18,6 +18,7 @@ from config import OPERATOR_NAMES, Config
 from database import Database
 from lift import clip_to_day, day_bounds, intersect_intervals, normalize_intervals
 from models import Change, DaySchedule, Event, Interval
+from telegram_ui import navigation_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +208,8 @@ class NotificationDispatcher:
                 continue
             try:
                 await self.sender.send_message(
-                    chat_id=chat_id, text=row["body"], parse_mode="HTML", request_timeout=20
+                    chat_id=chat_id, text=row["body"], parse_mode="HTML", request_timeout=20,
+                    reply_markup=navigation_keyboard(),
                 )
             except TelegramRetryAfter as exc:
                 # The request itself may have taken time. Preserve the longer shared

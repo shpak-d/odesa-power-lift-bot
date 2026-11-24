@@ -27,6 +27,7 @@ async def test_warning_once_after_restart(config, make_schedule, now):
     sender = RecordingSender()
     await NotificationDispatcher(db, sender).dispatch(due)
     assert len(sender.messages) == 2  # квартира + ліфт
+    assert all(message["reply_markup"].is_persistent for message in sender.messages)
     db.close()
     db = Database(config.database_path)
     try:

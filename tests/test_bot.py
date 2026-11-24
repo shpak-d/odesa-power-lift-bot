@@ -40,14 +40,22 @@ class LocalTelegramSession(BaseSession):
     "command,count,expected",
     [
         ("/start", 1, "Моніторинг налаштовано"),
+        ("/menu", 1, "Оберіть дію"),
         ("/today", 1, "Електроенергія"),
         ("/tomorrow", 1, "Електроенергія"),
         ("/lift", 2, "Прогноз ліфта"),
         ("/status", 1, "Стан моніторингу"),
+        ("/ping", 1, "Бот працює"),
         ("/help", 1, "Бот стежить"),
         ("Сьогодні", 1, "Електроенергія"),
+        ("Завтра", 1, "Електроенергія"),
+        ("Ліфт", 2, "Прогноз ліфта"),
+        ("Стан моніторингу", 1, "Стан моніторингу"),
+        ("Перевірити бота", 1, "Бот працює"),
+        ("Допомога", 1, "Бот стежить"),
     ],
 )
+@pytest.mark.parametrize("chat_id", [123, 999])
 async def test_commands_through_real_aiogram_dispatcher(
     config,
     db,
@@ -56,6 +64,7 @@ async def test_commands_through_real_aiogram_dispatcher(
     command,
     count,
     expected,
+    chat_id,
 ):
     db.apply_schedules(batch(make_schedule), now, lambda _: [])
     session = LocalTelegramSession()
@@ -67,15 +76,24 @@ async def test_commands_through_real_aiogram_dispatcher(
         message=Message(
             message_id=1,
             date=now,
-            chat=Chat(id=123, type="private"),
+            chat=Chat(id=chat_id, type="private"),
             text=command,
         ),
     )
     try:
         await dispatcher.feed_update(bot, update)
+        if chat_id == 999:
+            assert not session.sent
+            return
         assert len(session.sent) == count
         assert expected in session.sent[0].text
         assert config.bot_token not in session.sent[0].text
+        for response in session.sent:
+            keyboard = response.reply_markup
+            assert keyboard.is_persistent
+            assert {button.text for row in keyboard.keyboard for button in row} == {
+                "Сьогодні", "Завтра", "Ліфт", "Стан моніторингу", "Перевірити бота", "Допомога",
+            }
     finally:
         await session.close()
 

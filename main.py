@@ -48,10 +48,12 @@ async def telegram_loop(bot: GuardedBot, config: Config, db: Database, monitor: 
     await bot.set_my_commands(
         [
             BotCommand(command="start", description="Початок роботи"),
+            BotCommand(command="menu", description="Кнопки керування"),
             BotCommand(command="today", description="Графік на сьогодні"),
             BotCommand(command="tomorrow", description="Графік на завтра"),
             BotCommand(command="lift", description="Прогноз ліфта"),
             BotCommand(command="status", description="Стан моніторингу"),
+            BotCommand(command="ping", description="Перевірити, чи бот відповідає"),
             BotCommand(command="help", description="Допомога"),
         ],
         request_timeout=20,
